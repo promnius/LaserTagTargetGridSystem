@@ -1,13 +1,19 @@
+// TargetCell
+// Laser tag high resolution grid of receivers project for blaster calibration and/or hit location information.
+// code for a single sub unit of sensors.
+// Kyle Mayer
+// October 2019
+
 
 // TODO STILL:
-// packet validation code
+// &&packet validation code
 // odds and ends, see all caps comments (timeout code, max bit duration code, etc.)
 // accurate constants and pinouts
 // comments
-// debug print statements- make sure they don't interfere with the normal code!! Thanks Teensy for true USB comms!! Consider adding better debugging (see website).
-// timing code to track how long the loop takes to execute
+// &&debug print statements- make sure they don't interfere with the normal code!! Thanks Teensy for true USB comms!! Consider adding better debugging (see website).
+// &&timing code to track how long the loop takes to execute
 
-boolean Debug = true;
+int Debug = 2;
 
 // SENSOR VARIABLE DECLARATION
 boolean IRReceiverStates[64]; // what state is the reciever in, so next time we sample it, we will know if it changed
@@ -41,27 +47,37 @@ int nowSensorCounter = 0;
 unsigned long nowTime = 0;
 int nowState = 0;
 
+// TIMING VARIABLES
+unsigned long lngScanTime = 0;
+unsigned long lngTimeStart = 0;
+
 void setup() {
-  // put your setup code here, to run once:
   Serial2.begin(1000000); // we'll see how fast we can go
   if (Debug){Serial.begin(9600);} // for debugging
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
+  if(Debug>1){Serial.println("Loop, Scanning Sensors");}
+  if(Debug>1){delay(500);}
+  lngTimeStart = micros();
   for(int i = 0; i < 8; i ++){
     setMux(i);
     sampleSensors(i);
   }
-  
+  lngScanTime = micros(); - lngTimeStart;
+  if(Debug){Serial.print("Time to scan sensors: "); Serial.print(lngScanTime); Serial.println(" uS.");}
 
+  
+  // check comms status, handle requests if need be
   while(Serial2.available()){
     myByte = Serial2.read();
     if (myByte == 0xF0){ // stop byte received
+      if(Debug){Serial.println("Stop Byte Received, Dumping Data.");}
       printData();
       clearData();
       Serial2.print(myByte); // retransmit stop byte
     } else{
+      if(Debug){Serial.println("Retransmitting Message");}
       Serial2.print(myByte); // simply pass through data
     }
   }
@@ -113,7 +129,11 @@ void printData(){
 // it is up to topside to maintain persistent data if desired. We only want to send the data again if our
 // sensors pick it up again.
 void clearData(){
+  if(Debug){Serial.println("Clearing Data!");}
+  if(Debug){Serial.println("Last Display Frame:");}
   for (int i = 0; i < 64; i ++){
+    if(Debug){Serial.print(IRReceiverDisplayStatus[i]);Serial.print(",");}
+    if(Debug){if(((i+1)%8)==0){Serial.println();}}
     IRReceiverDisplayStatus[i] = 0; // we've already sent any display info, if the sensors are still receiving data
     // we'll reset this and send it again, otherwise it is up to topside to do a faded or persistent animation
   }
@@ -139,15 +159,19 @@ void sampleSensors(int channel){
           // DO WE WANT TO CHECK FOR MAX TIMEOUT TOO??
           IRReceiverDataPackets[nowSensorCounter] = 0; // reset any existing packets. If they weren't complete, it's too late now!
           IRReceiverDataPointer[nowSensorCounter] = 0;
+          if(Debug){Serial.print("Sensor "); Serial.print(nowSensorCounter); Serial.println(" Detected a Header");}
+          
         }
         else if (nowTime - IRReceiverLastTransition[nowSensorCounter] > oneThreshold){
           IRReceiverDataPackets[nowSensorCounter] = IRReceiverDataPackets[nowSensorCounter] | (0x0001 << IRReceiverDataPointer[nowSensorCounter]);
           IRReceiverDataPointer[nowSensorCounter] ++;
+          if(Debug){Serial.print("Sensor "); Serial.print(nowSensorCounter); Serial.println(" Detected a One");}
         }
         else if (nowTime - IRReceiverLastTransition[nowSensorCounter] > zeroThreshold){
           // this is actually unnecessary because it is already 0 by default.
           IRReceiverDataPackets[nowSensorCounter] = IRReceiverDataPackets[nowSensorCounter] & (0xFFFE << IRReceiverDataPointer[nowSensorCounter]);
           IRReceiverDataPointer[nowSensorCounter] ++;
+          if(Debug){Serial.print("Sensor "); Serial.print(nowSensorCounter); Serial.println(" Detected a Zero");}
         }
         if (nowTime - IRReceiverLastTransition[nowSensorCounter] > zeroThreshold){ // this time NOT an else if . . . we just want to know if the data
           // was long enough to be considered more than a fluke (so debouncing), for the sake of display
@@ -155,6 +179,7 @@ void sampleSensors(int channel){
             IRReceiverDisplayStatus[nowSensorCounter] = 1;
           }
         }
+        if(Debug){Serial.print("New Data packet: "); Serial.println(IRReceiverDataPackets[nowSensorCounter]);}
         if (IRReceiverDataPointer[nowSensorCounter] > 31){
           // THROW ERROR!!! we have exceeded our buffer . . . which also means we concatanated partial packets
           if (Debug){Serial.println("MAJOR ERROR, DATA OVERFLOW!!");}
@@ -176,5 +201,19 @@ void sampleSensors(int channel){
 // is if we just received a new bit, so no reason to check more often than that.
 // it will also clear out the appropriate registers if the packet was valid, so we don't keep re-evaluating it as valid.
 void attemptDataPacketValidation(int sensor){
-  
+  // there will be many more ways to look at this, especially if I have variable packet length or 
+  // partial packet decoding
+  if (IRReceiverDataPointer[sensor] == 12){
+    // at some point we would also want a checksum placed in here!!
+    if(Debug){Serial.println("Valid code found!");}
+    if(Debug){Serial.println(IRReceiverDataPackets[sensor]);}
+    ValidCodes[ValidCodesPointer] = IRReceiverDataPackets[sensor];
+    ValidCodesPointer ++;
+    if (ValidCodesPointer > (ValidCodeBufferLength - 1)){
+      if(Debug){Serial.println("ERROR!!! OVERFLOW!!");}
+      ValidCodesPointer = 0;
+    }
+    // NOTE: WE DON'T clear the data buffer right now, because this may have been a partial packet.
+    // only a header bit can clear the data packet.
+  }
 }
