@@ -6,14 +6,10 @@
 
 
 // TODO STILL:
-// &&packet validation code
+// &&packet validation code (something crude is implemented, but we need to identify what a real packet looks like)
 // odds and ends, see all caps comments (timeout code, max bit duration code, etc.)
-// accurate constants and pinouts
-// comments
-// &&debug print statements- make sure they don't interfere with the normal code!! Thanks Teensy for true USB comms!! Consider adding better debugging (see website).
-// &&timing code to track how long the loop takes to execute
 
-int Debug = 2;
+int Debug = 3; // 3 is most useful. 4 is verbose. 5 is max. 2 is kind of broken without any delays. any debugging kind of breaks real time, therefore packet decoding is broken.
 
 // SENSOR VARIABLE DECLARATION
 boolean IRReceiverStates[64]; // what state is the reciever in, so next time we sample it, we will know if it changed
@@ -29,58 +25,111 @@ byte IRReceiverDisplayStatus[64]; // for each sensor, if we were going to create
 // like team, damage, player who hit it, etc. but 0-3 compresses well for sending topside.
 
 // PIN DECLARATIONS
-int pinANALOGSELECT0 = 1;
-int pinANALOGSELECT1 = 1;
-int pinANALOGSELECT2 = 1;
-int pinsSENSORS[] = {1,1,1,1,1,1,1,1};
+int pinANALOGSELECT0 = 12;
+int pinANALOGSELECT1 = 13;
+int pinANALOGSELECT2 = 14;
+int pinsSENSORS[] = {15,16,17,18,19,20,21,22};
+int pinHeartbeat = 5;
+//int pinHeartbeat = 13;
 
 // PROGRAM CONSTANTS
 unsigned int headerThreshold = 1200; // time in us required for a valid signal
 unsigned int oneThreshold = 700;
 unsigned int zeroThreshold = 400;
 
-// GLOBAL CONSTANTS
+// GLOBAL VARIABLES
 int myByte = 0; 
 int dataByte = 0;
 int dataCounter = 0;
 int nowSensorCounter = 0;
 unsigned long nowTime = 0;
 int nowState = 0;
+boolean booHeartbeatState = LOW;
 
 // TIMING VARIABLES
 unsigned long lngScanTime = 0;
 unsigned long lngTimeStart = 0;
+unsigned long lngScanEndTime = 0;
+unsigned long lngCommsEndTime = 0;
+unsigned long lngCommsTime = 0;
+unsigned long lngHeartbeatTimer = 0;
+unsigned long lngCommsStartTime = 0;
+
 
 void setup() {
-  Serial2.begin(1000000); // we'll see how fast we can go
-  if (Debug){Serial.begin(9600);} // for debugging
+  pinMode(pinHeartbeat, OUTPUT);
+  pinMode(pinANALOGSELECT0, OUTPUT);
+  pinMode(pinANALOGSELECT1, OUTPUT);
+  pinMode(pinANALOGSELECT2, OUTPUT);
+  
+
+  
+  
+  Serial2.begin(9600); // we'll see how fast we can go
+  if (Debug>0){Serial.begin(9600);Serial.print("Setup Finished. Debug level: "); Serial.println(Debug);} // for debugging
+  lngHeartbeatTimer = millis();
+
+  delay(100);
+  for (int counter = 0; counter < 8; counter ++){
+    pinMode(pinsSENSORS[counter], INPUT);
+    delay(100);
+    if (Debug>3){
+      Serial.print("Sensor pin: ");
+      Serial.println(pinsSENSORS[counter]);
+      Serial.print("Sensor Status: ");
+      Serial.println(digitalRead(pinsSENSORS[counter]));}
+  }
+  delay(100);
+
+  
 }
 
 void loop() {
+  
+  if (millis() - lngHeartbeatTimer > 1000){
+    booHeartbeatState = !booHeartbeatState;
+    digitalWrite(pinHeartbeat, booHeartbeatState);
+    lngHeartbeatTimer = millis();
+    printDisplayStatus();
+    
+  }
+  
   if(Debug>1){Serial.println("Loop, Scanning Sensors");}
-  if(Debug>1){delay(500);}
+  if(Debug>2){delay(3000);}
   lngTimeStart = micros();
   for(int i = 0; i < 8; i ++){
     setMux(i);
     sampleSensors(i);
   }
-  lngScanTime = micros(); - lngTimeStart;
-  if(Debug){Serial.print("Time to scan sensors: "); Serial.print(lngScanTime); Serial.println(" uS.");}
+  lngScanEndTime = micros();
+  lngScanTime = lngScanEndTime - lngTimeStart;
+  if(Debug>1){Serial.print("Time to scan sensors: "); Serial.print(lngScanTime); Serial.println(" uS.");}
 
   
   // check comms status, handle requests if need be
+  // THIS SECTION MAY NEED SOME TIMOUT HANDLING OR SERIAL BUFFER MODIFICATION, AND OF COURSE THIS CAN
+  // BREAK WITH DEBUGGING ON.
+  lngCommsStartTime = micros();
   while(Serial2.available()){
     myByte = Serial2.read();
-    if (myByte == 0xF0){ // stop byte received
-      if(Debug){Serial.println("Stop Byte Received, Dumping Data.");}
-      printData();
-      clearData();
-      Serial2.print(myByte); // retransmit stop byte
-    } else{
-      if(Debug){Serial.println("Retransmitting Message");}
-      Serial2.print(myByte); // simply pass through data
+    //Serial.println(myByte);
+    if (myByte == 0xF0){ // stop byte (visual data request) received
+      if(Debug>1){Serial.println("Stop byte for visual data request received, Dumping data.");}
+      printVisualData();
+      clearMyVisualData();
+      Serial2.write(myByte); // retransmit stop byte
+    } else if(myByte == 0xF7){ // reserved for stop byte (valid code request), not implemented yet.
+      
+    }else{
+      if(Debug>1){Serial.print("Retransmitting Message: "); Serial.println(myByte, BIN);}
+      Serial2.write(myByte); // simply pass through data
     }
   }
+
+  lngCommsEndTime = micros();
+  lngCommsTime = lngCommsEndTime - lngCommsStartTime;
+
+  if(Debug>1){Serial.print("Time to handle Comms requests: "); Serial.print(lngCommsTime); Serial.println(" uS.");}
 }
 
 // allows a single function call for setting a mux channel. Note: this function currently
@@ -95,12 +144,12 @@ void setMux(int channel){
   if ((channel/4)%2 == 1){digitalWrite(pinANALOGSELECT2, HIGH);} else{digitalWrite(pinANALOGSELECT2, LOW);}
   // This hardware is only for an 8 to 1 mux
   //if ((channel/8)%2 == 1){digitalWrite(pinANALOGSELECT3, HIGH);} else{digitalWrite(pinANALOGSELECT3, LOW);}
-  delayMicroseconds(5); // give settling/ capacitor charge shuffle equilization time.
+  delayMicroseconds(8); // give settling/ capacitor charge shuffle equilization time.
 }
 
 // prints all interesting information in a condensed form up to the topside.
-void printData(){
-  Serial2.print(0xF1); // reserved header to say new cell start. Could someday also include a cell ID,
+void printVisualData(){
+  Serial2.write(0xF1); // reserved header to say new cell start. Could someday also include a cell ID,
   // but for now we don't have code for dynamic cell ID config.
   dataCounter = 0;
   for (int i = 0; i < 21; i ++){ // 22 is a magic number for 64 sensors, each with 2 bits of data, sending only
@@ -113,65 +162,73 @@ void printData(){
     dataCounter ++;
     dataByte = dataByte | IRReceiverDisplayStatus[dataCounter] << 4;
     dataCounter ++;
-    Serial2.print(dataByte);
+    Serial2.write(dataByte);
   }
   dataByte = 0x00;
   dataByte = dataByte | IRReceiverDisplayStatus[dataCounter];
-  Serial2.print(dataByte);
+  Serial2.write(dataByte);
 
+  /* THIS WILL NOW BE HANDLED IN A SEPARATE CALL, WHERE A SEPARATE RESERVED CODE IS SENT TO REQUEST THE VALID CODES.
+   *  THIS LETS ME FINISH DEVELOPMENT WITHOUT HAVING TO IMPLEMENT OR TEST THIS.
   for (int i = 0; i < ValidCodesPointer; i ++){
     // maybe add another reserved byte here to make decoding slightly easier??
     Serial2.print(ValidCodes[i]); // we'll have to see if this formats correctly or not
   }
+  */
 }
 
 // clears any data registers that are sent topside, so after they are sent we won't be repeating ourselves.
 // it is up to topside to maintain persistent data if desired. We only want to send the data again if our
 // sensors pick it up again.
-void clearData(){
-  if(Debug){Serial.println("Clearing Data!");}
-  if(Debug){Serial.println("Last Display Frame:");}
+void clearMyVisualData(){
+  if(Debug>1){Serial.println("Clearing Visual Data!");}
+  if(Debug>1){Serial.println("Last Display Frame:");}
+  printDisplayStatus();
+  
   for (int i = 0; i < 64; i ++){
-    if(Debug){Serial.print(IRReceiverDisplayStatus[i]);Serial.print(",");}
-    if(Debug){if(((i+1)%8)==0){Serial.println();}}
+    //if(Debug>1){Serial.print(IRReceiverDisplayStatus[i]);Serial.print(",");}
+    //if(Debug>1){if(((i+1)%8)==0){Serial.println();}}
     IRReceiverDisplayStatus[i] = 0; // we've already sent any display info, if the sensors are still receiving data
     // we'll reset this and send it again, otherwise it is up to topside to do a faded or persistent animation
-  }
+  } 
+
+  /* THIS IS NOW TO BE HANDLED SEPARATELY
   for (int i = 0; i < ValidCodeBufferLength; i ++){ // same deal here, if partial packets are formed, that info is preserved
     // in the IRReceiverDataPackets
     ValidCodes[i] = 0;
   }
-  ValidCodesPointer = 0;
+  ValidCodesPointer = 0;*/ 
 }
 
 // this function grabs the current values for each pin on the micro for the current mux setting, then figures out
 // if anything interesting is happening ie data recieved and what kind of data and valid packets, etc.
 void sampleSensors(int channel){
-
   for (int counter = 0; counter < 8; counter ++){
     nowSensorCounter = channel + counter*8;
     nowTime = micros();
     nowState = digitalRead(pinsSENSORS[counter]);
-  
+    nowState = !nowState; // sensors idle high and are active low, but my logic was for the inverse.
+    if (nowState == 1 && Debug>4){Serial.print("Sensor: "); Serial.print(channel);Serial.print(",");Serial.print(nowSensorCounter);Serial.println(" is a 1");}
+    if (nowState == 0 && Debug>4){Serial.print("Sensor: "); Serial.print(channel);Serial.print(",");Serial.print(nowSensorCounter);Serial.println(" is a 0");}
     if (nowState != IRReceiverStates[nowSensorCounter]){ // data value has changed
       if (nowState == 0){ // data changed from 1 to 0, so end of a burst
         if (nowTime - IRReceiverLastTransition[nowSensorCounter] > headerThreshold){ // new packet forming
           // DO WE WANT TO CHECK FOR MAX TIMEOUT TOO??
           IRReceiverDataPackets[nowSensorCounter] = 0; // reset any existing packets. If they weren't complete, it's too late now!
           IRReceiverDataPointer[nowSensorCounter] = 0;
-          if(Debug){Serial.print("Sensor "); Serial.print(nowSensorCounter); Serial.println(" Detected a Header");}
+          if(Debug>3){Serial.print("Sensor "); Serial.print(nowSensorCounter); Serial.println(" Detected a Header");}
           
         }
         else if (nowTime - IRReceiverLastTransition[nowSensorCounter] > oneThreshold){
           IRReceiverDataPackets[nowSensorCounter] = IRReceiverDataPackets[nowSensorCounter] | (0x0001 << IRReceiverDataPointer[nowSensorCounter]);
           IRReceiverDataPointer[nowSensorCounter] ++;
-          if(Debug){Serial.print("Sensor "); Serial.print(nowSensorCounter); Serial.println(" Detected a One");}
+          if(Debug>3){Serial.print("Sensor "); Serial.print(nowSensorCounter); Serial.println(" Detected a One");}
         }
         else if (nowTime - IRReceiverLastTransition[nowSensorCounter] > zeroThreshold){
           // this is actually unnecessary because it is already 0 by default.
           IRReceiverDataPackets[nowSensorCounter] = IRReceiverDataPackets[nowSensorCounter] & (0xFFFE << IRReceiverDataPointer[nowSensorCounter]);
           IRReceiverDataPointer[nowSensorCounter] ++;
-          if(Debug){Serial.print("Sensor "); Serial.print(nowSensorCounter); Serial.println(" Detected a Zero");}
+          if(Debug>3){Serial.print("Sensor "); Serial.print(nowSensorCounter); Serial.println(" Detected a Zero");}
         }
         if (nowTime - IRReceiverLastTransition[nowSensorCounter] > zeroThreshold){ // this time NOT an else if . . . we just want to know if the data
           // was long enough to be considered more than a fluke (so debouncing), for the sake of display
@@ -179,10 +236,10 @@ void sampleSensors(int channel){
             IRReceiverDisplayStatus[nowSensorCounter] = 1;
           }
         }
-        if(Debug){Serial.print("New Data packet: "); Serial.println(IRReceiverDataPackets[nowSensorCounter]);}
+        if(Debug>4){Serial.print("New Data packet: "); Serial.println(IRReceiverDataPackets[nowSensorCounter]);}
         if (IRReceiverDataPointer[nowSensorCounter] > 31){
           // THROW ERROR!!! we have exceeded our buffer . . . which also means we concatanated partial packets
-          if (Debug){Serial.println("MAJOR ERROR, DATA OVERFLOW!!");}
+          if (Debug>1){Serial.println("MAJOR ERROR, DATA OVERFLOW!!");}
           IRReceiverDataPointer[nowSensorCounter] = 0;
         }
         attemptDataPacketValidation(nowSensorCounter);
@@ -201,19 +258,33 @@ void sampleSensors(int channel){
 // is if we just received a new bit, so no reason to check more often than that.
 // it will also clear out the appropriate registers if the packet was valid, so we don't keep re-evaluating it as valid.
 void attemptDataPacketValidation(int sensor){
+  if(Debug>4){Serial.println("Searching for valid codes:");}
   // there will be many more ways to look at this, especially if I have variable packet length or 
   // partial packet decoding
   if (IRReceiverDataPointer[sensor] == 12){
     // at some point we would also want a checksum placed in here!!
-    if(Debug){Serial.println("Valid code found!");}
-    if(Debug){Serial.println(IRReceiverDataPackets[sensor]);}
+    if(Debug>4){Serial.println("Valid code found!");}
+    if(Debug>4){Serial.println(IRReceiverDataPackets[sensor]);}
     ValidCodes[ValidCodesPointer] = IRReceiverDataPackets[sensor];
     ValidCodesPointer ++;
     if (ValidCodesPointer > (ValidCodeBufferLength - 1)){
-      if(Debug){Serial.println("ERROR!!! OVERFLOW!!");}
+      if(Debug>1){Serial.println("ERROR!!! OVERFLOW!!");}
       ValidCodesPointer = 0;
     }
     // NOTE: WE DON'T clear the data buffer right now, because this may have been a partial packet.
     // only a header bit can clear the data packet.
-  }
+  } else{ if(Debug>4){Serial.println("No valid codes found.");}}
+}
+
+void printDisplayStatus(){
+  Serial.println();
+  for (int counter1 = 0; counter1 < 8; counter1 ++){
+    for (int counter2 = 7; counter2 >= 0; counter2 --){
+      if (IRReceiverDisplayStatus[counter1*8+counter2] > 0){Serial.print("X");} else{Serial.print("O");}
+      Serial.print(",");      
+    }
+    Serial.println();
+  } 
+  Serial.println();
+  
 }
