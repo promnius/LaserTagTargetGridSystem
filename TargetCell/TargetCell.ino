@@ -9,7 +9,7 @@
 // &&packet validation code (something crude is implemented, but we need to identify what a real packet looks like)
 // odds and ends, see all caps comments (timeout code, max bit duration code, etc.)
 
-int Debug = 3; // 3 is most useful. 4 is verbose. 5 is max. 2 is kind of broken without any delays. any debugging kind of breaks real time, therefore packet decoding is broken.
+int Debug = 0; // 3 is most useful. 4 is verbose. 5 is max. 2 is kind of broken without any delays. any debugging kind of breaks real time, therefore packet decoding is broken.
 
 // SENSOR VARIABLE DECLARATION
 boolean IRReceiverStates[64]; // what state is the reciever in, so next time we sample it, we will know if it changed
@@ -61,11 +61,8 @@ void setup() {
   pinMode(pinANALOGSELECT0, OUTPUT);
   pinMode(pinANALOGSELECT1, OUTPUT);
   pinMode(pinANALOGSELECT2, OUTPUT);
-  
-
-  
-  
-  Serial2.begin(9600); // we'll see how fast we can go
+ 
+  Serial2.begin(1000000); // we'll see how fast we can go
   if (Debug>0){Serial.begin(9600);Serial.print("Setup Finished. Debug level: "); Serial.println(Debug);} // for debugging
   lngHeartbeatTimer = millis();
 

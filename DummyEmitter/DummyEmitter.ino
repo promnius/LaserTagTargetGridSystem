@@ -2,17 +2,37 @@
 #include <WS2812Serial.h>
 
 int pinTransmit = 4;
+int pinHeartBeat = 13;
 int pinLEDDATA = 1;
 static const int NUMRECIEVERS = 256;
 static const int numled = 256; // do I really need two different numbers here??
 byte recieverStatus[NUMRECIEVERS];
+byte MAPPEDReceiverStatus[NUMRECIEVERS];
+byte LEDIntensity[NUMRECIEVERS];
+byte MAPPEDLEDIntensity[NUMRECIEVERS];
 int affectedLED0 = 0;
 int affectedLED1 = 0;
 int affectedLED2 = 0;
 int affectedLED3 = 0;
+int panelNumber = 0;
+int recieverNumber = 0;
+int recieverPanelRow = 0;
+int recieverPanelColumn = 0;
+int startRow = 0;
+int startColumn = 0;
+int newRow = 0;
+int newColumn = 0;
+int newLocation = 0;
+int row = 0;
+int column = 0;
+int maxBrightnessScalar = 3;
+int debug = -1; // -1 is off (30hz polling), 0 is timing only with 2hz polling, 2 is useful (polling only every 10 seconds, 
+// mostly so that you can also debug the panels without overwelming them with requests), 3 is max
 
 unsigned long lngDataRequestStartTime = 0;
 unsigned long lngDataRequestEndTime = 0;
+unsigned long lngMathStartTime = 0;
+unsigned long lngMathEndTime = 0;
 boolean readbackActive = false;
 int displayCounter = 0;
 int dataByteCounter = 0;
@@ -50,19 +70,32 @@ void setup() {
   analogWriteFrequency(pinTransmit, 38000);
   analogWrite(pinTransmit, 127);
 
-  Serial2.begin(9600); // we'll see how fast we can go.
-  delay(5000);
+  leds.begin();
+  //colorWipe(RED,50);
+  leds.clear();
+  leds.show();
+
+  //Serial2.begin(9600); // we'll see how fast we can go. 9600 is nice for testing because 
+  // the LEDs are very visible. everyone must agree on a speed though.
+  Serial2.begin(1000000);
+  delay(3000);
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-  delay(10000);
+  if(debug>2){delay(10000);}
+  if (debug>-1){delay(500);}
+  delay(30);
   requestVisualData();
+  lngMathStartTime = micros();
+  if(debug>2){printRecieversByPanel();}
   mapRecieverDataToLEDs(); // the data that comes back is in 8x8 chunks, but the leds are not mapped like this.
   // also, each reciever, being inbetween the leds, actually maps to 4 leds.
+  gammaCorrect();
   leds.show();
   fadeRecieverData(); // cause reciever data to dim over time, a sort of 'fade' effect will happen on the LEDs.
-  
+  lngMathEndTime = micros();
+  if (debug>-1){Serial.print("Time math: ");Serial.print(lngMathEndTime - lngMathStartTime);Serial.println(" uS.");Serial.println();}
 }
 
 // sends a daisy serial request for visual data, waits for data to come back, and processes the data.
@@ -73,7 +106,7 @@ void requestVisualData(){
   Serial2.write(0b11110000);
   readbackActive = true;
   displayCounter = 0;
-  Serial.println("Sent request for data: waiting for return");
+  if (debug>0){Serial.println("Sent request for data: waiting for return");}
   while(readbackActive){ // keep looking for data until it all comes back
     // if we wanted timeout functionality, or ANY error handling (a single bad bit will totally break
     // everything right now), this is where it would go. Just add another end condition, and the proper 
@@ -82,12 +115,12 @@ void requestVisualData(){
       myByte = Serial2.read();
       if (myByte == 0xF0){ // stop byte, transmission over
         readbackActive = false;
-        Serial.println("Got stop byte, transmission over");
+        if (debug>0){Serial.println("Got stop byte, transmission over");}
       } else if (myByte == 0xF1){ // new message header
-        Serial.println("Got header byte, new tile is sending data");
-        Serial.print("Last tile sent: ");
-        Serial.print(dataByteCounter);
-        Serial.println(" Bytes of data. Should be 22.");
+        if (debug>0){Serial.println("Got header byte, new tile is sending data");}
+        if (debug>0){Serial.print("Last tile sent: ");}
+        if (debug>0){Serial.print(dataByteCounter);}
+        if (debug>0){Serial.println(" Bytes of data. Should be 22.");}
         dataByteCounter = 0;
       }else{ // assumed to be a data byte.
         // structure: each tile sends 22 data bytes, with the first 21 containing 3 elements with 2 bits each 
@@ -108,12 +141,8 @@ void requestVisualData(){
     }  
   }
   lngDataRequestEndTime = micros();
-  Serial.print("Exited loop. Number of sensors to respond: ");
-  Serial.print(displayCounter); Serial.print(", should be: "); Serial.println(NUMRECIEVERS);
-  Serial.print("Time to accumulate data: ");
-  Serial.print(lngDataRequestEndTime - lngDataRequestStartTime); 
-  Serial.println(" uS.");
-  Serial.println();
+  if (debug>0){Serial.print("Exited loop. Number of sensors to respond: ");Serial.print(displayCounter); Serial.print(", should be: "); Serial.println(NUMRECIEVERS);}
+  if (debug>-1){Serial.print("Time comms: ");Serial.print(lngDataRequestEndTime - lngDataRequestStartTime);Serial.println(" uS.");Serial.println();}
 }
 
 // this enables the master unit to determine what if any valid laser tag codes have been
@@ -122,35 +151,114 @@ void requestValidCodes(){
   
 }
 
-// this function maps the 8x8 recievers (centered between 4 leds each) to the 16x16 leds.
+// this function maps the 8x8 recievers (centered between 4 leds each) to the 16x16 leds. It is specifically for this mapping,
+// but could be expanded for larger panels
 void mapRecieverDataToLEDs(){
+  // -------------------------------------------- THIS CODE IS WHAT CHANGES IF A DIFFERENT PANEL ARRANGEMENT IS USED -----------------------------
+  // could put a look up table here for complex geometries, or calculate it manually
+  reconstructRecieverGrid();
+  if (debug>2){printRecieversAsGroup();}
+  if (debug>1){printUnmappedLEDs();}
+  // -------------------------------------------- END CODE THAT CHANGES IF A DIFFERENT PANEL ARRANGEMENT IS USED ---------------------------------
   for (int i = 0; i < numled*3; i++){
     drawingMemory[i] = 0; // wipe the old data so we can prepare the new
+  }
+  for (int i = 0; i < numled; i++){
+    drawingMemory[i*3] = MAPPEDLEDIntensity[i];
   }
 }
 
 // dimms each receiver value as a function of time . . . or crudely, as a function of how fast this gets called.
 void fadeRecieverData(){
   for (int i = 0; i < NUMRECIEVERS; i ++){
-    recieverStatus[i] = recieverStatus[i] - 1;
+    if (recieverStatus[i] > 0){recieverStatus[i] = recieverStatus[i] - 1;}
   }
 }
 
 // THIS IS DESTRUCTIVE!!
 void gammaCorrect(){
   for (int i = 0; i < numled*3; i++){
+    drawingMemory[i] = drawingMemory[i] / maxBrightnessScalar;
     drawingMemory[i] = pgm_read_byte(&gamma8[drawingMemory[i]]);
   }
-  for (int i = 0; i < NUMRECIEVERS; i++){
-    panelNumber = i/64;
-    recieverNumber  = i%64;
-    // -------------------------------------------- THIS CODE IS WHAT CHANGES IF A DIFFERENT PANEL ARRANGEMENT IS USED -----------------------------
-    affectedLED0 = i
-    // -------------------------------------------- END CODE THAT CHANGES IF A DIFFERENT PANEL ARRANGEMENT IS USED ---------------------------------
-    // < 0 means the LED doesn't exist, ie, the reciever is on the edge of the map and not all the LEDs around it are real.
-    if (affectedLED0 > 0){drawingMemory[affectedLED0] = drawingMemory[affectedLED0]+(recieverStatus[i]/4);}
-    if (affectedLED1 > 0){drawingMemory[affectedLED1] = drawingMemory[affectedLED1]+(recieverStatus[i]/4);}
-    if (affectedLED2 > 0){drawingMemory[affectedLED2] = drawingMemory[affectedLED2]+(recieverStatus[i]/4);}
-    if (affectedLED3 > 0){drawingMemory[affectedLED3] = drawingMemory[affectedLED3]+(recieverStatus[i]/4);}
+}
+
+
+void printRecieversByPanel(){
+  Serial.println();
+  for(int panelCounter = 0; panelCounter < 4; panelCounter ++){
+    for (int counter1 = 0; counter1 < 64; counter1 ++){
+      if (counter1%8==0){Serial.println();}
+      if (recieverStatus[counter1 + 64*panelCounter] > 0){Serial.print("X");} else{Serial.print("O");}
+      Serial.print(",");      
+    }
+    Serial.println();
+  }  
+}
+
+void printRecieversAsGroup(){
+  //Serial.println();
+  for(int printCounter = 0; printCounter < 256; printCounter ++){
+    if (printCounter%16==0){Serial.println();}
+    if (MAPPEDReceiverStatus[printCounter] > 0){Serial.print("X");} else{Serial.print("O");}
+    Serial.print(",");   
+  }
+  Serial.println();
+}
+
+void printUnmappedLEDs(){
+  //Serial.println();
+  for(int printCounter = 0; printCounter < 256; printCounter ++){
+    if (printCounter%16==0){Serial.println();}
+    Serial.print(LEDIntensity[printCounter]/63);
+    Serial.print(",");   
+  }
+  Serial.println();
+}
+
+void reconstructRecieverGrid(){
+  // fairly generic for any number of 8x8 reciever grids in a square
+  for(int counter = 0; counter < NUMRECIEVERS; counter ++){
+    panelNumber = counter/64;
+    recieverNumber  = counter%64;
+    recieverPanelRow = recieverNumber/8;
+    recieverPanelColumn = recieverNumber%8;
+    recieverPanelRow = 7-recieverPanelRow; // because they are indexed bottom to top . . . 
+    if (panelNumber == 0){startRow = 8; startColumn = 8;} // need to compute this algorithemically if we want this method to be expandable to larger grids
+    if (panelNumber == 1){startRow = 8; startColumn = 0;}
+    if (panelNumber == 2){startRow = 0; startColumn = 8;}
+    if (panelNumber == 3){startRow = 0; startColumn = 0;}
+  
+    newRow = startRow + recieverPanelRow;
+    newColumn = startColumn + recieverPanelColumn;
+    newLocation = newColumn + 16*newRow;
+    MAPPEDReceiverStatus[newLocation] = recieverStatus[counter];
+  }
+
+  // clear out the old LEDIntensity register so we can recompute using += math.
+  for(int counter = 0; counter < NUMRECIEVERS; counter ++){
+    LEDIntensity[counter] = 0;
+  }
+
+  // compute the new LED intensities: each reciever applies to 4 LEDs (assuming it is not an edge reciever)
+  for(int counter = 0; counter < NUMRECIEVERS; counter ++){
+    LEDIntensity[counter] += MAPPEDReceiverStatus[counter]/4; // every reciever adds to the LED of its same numbering (lower left)
+    if (counter%16!=15){LEDIntensity[counter+1] += MAPPEDReceiverStatus[counter]/4;} // if the reciever is not the last one in the row,
+    // it also adds to the LED to its lower right
+    if (counter>15){LEDIntensity[counter-16] += MAPPEDReceiverStatus[counter]/4;} // if the receiver is not in the first row, it adds to the LED to its upper left.
+    if (counter > 15 && counter%16!=15){LEDIntensity[counter-15] += MAPPEDReceiverStatus[counter]/4;} // if the receiver is not in the first row 
+    // AND not the last one in its row, it adds to the LED to its upper right
+  }
+
+  // now, alter the LED MAPPING to be specific specific to a single 16x16 LED grid, mapped the way I have choosen to map it.
+  // due to routing reasons, it snakes back and forth and starts in the lower left and snakes vertically first . . . so we just
+  // need to do some matrix math.
+  for(int counter = 0; counter < NUMRECIEVERS; counter ++){
+    row = counter /16;
+    column = counter%16;
+    newRow = column;
+    if (newRow%2 == 1){newColumn = row;} 
+    else {newColumn = 15 - row;} // pattern zigzags
+    {MAPPEDLEDIntensity[newRow*16+newColumn] = LEDIntensity[counter];}
   }
 }
