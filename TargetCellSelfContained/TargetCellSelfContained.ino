@@ -11,6 +11,15 @@
 // Support for non-teensy drivers: other than going slower, may need to move the serial stuff to a new port, and handle it in interrupts (teensy
     // does some dark magic to handle uarts). maybe an esp32 is a good candidate? ATMEGA328, but may be slow? or an STM32? need something fast-ish and cheap, no
     // other real hardware needs.
+    
+#include <WS2812Serial.h>
+#define RED    0x160000
+#define GREEN  0x001600
+#define BLUE   0x000016
+#define YELLOW 0x101400
+#define PINK   0x120009
+#define ORANGE 0x100400
+#define WHITE  0x101010
 
 int Debug = 0; // 3 is most useful. 4 is verbose. 5 is max. 2 is kind of broken without any delays. any debugging kind of breaks real time, therefore packet decoding is broken.
 
@@ -26,6 +35,9 @@ int ValidCodesPointer = 0;
 byte IRReceiverDisplayStatus[64]; // for each sensor, if we were going to create a display representing the last unit of time, what would that look like?
 // 0 for no data, 1 for data but no valid packets, 2 for valid but incomplete packets, 3 for complete packets, etc. Could create codes for all sorts of info
 // like team, damage, player who hit it, etc. but 0-3 compresses well for sending topside.
+int recieverLEDStatus[64];
+int LEDDisplay[256]; // There are a lot of duplicated registers here/ intermediate registers used only for math . . . this is just a mapped version of recieverLEDStatus, broken
+// out for the indevidual LEDs. It should be identical to the drawing buffers used by the LED library.
 
 // PIN DECLARATIONS
 int pinANALOGSELECT0 = 12;
@@ -33,6 +45,7 @@ int pinANALOGSELECT1 = 13;
 int pinANALOGSELECT2 = 14;
 int pinsSENSORS[] = {15,16,17,18,19,20,21,22};
 int pinHeartbeat = 5;
+int pinLEDDATA = 1;
 //int pinHeartbeat = 13;
 
 // PROGRAM CONSTANTS
@@ -58,12 +71,61 @@ unsigned long lngCommsTime = 0;
 unsigned long lngHeartbeatTimer = 0;
 unsigned long lngCommsStartTime = 0;
 
+static const int numled = 256; // do I really need two different numbers here??
+// FANCY VARIABLES FOR LEDs
+byte rawDrawingMemory[numled*3];         //  3 bytes per LED, for doing non-destructive math before gamma correction
+byte drawingMemory[numled*3];         //  3 bytes per LED, actual data mask
+DMAMEM byte displayMemory[numled*12]; // 12 bytes per LED, unpacked data mask for non-blocking serial print
+WS2812Serial leds(numled, displayMemory, drawingMemory, pinLEDDATA, WS2812_RGB);
+
+const uint8_t PROGMEM gamma8[] = {
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  2,  2,  2,  2,  2,  2,  2,
+    2,  3,  3,  3,  3,  3,  3,  3,  4,  4,  4,  4,  4,  5,  5,  5,
+    5,  6,  6,  6,  6,  7,  7,  7,  7,  8,  8,  8,  9,  9,  9, 10,
+   10, 10, 11, 11, 11, 12, 12, 13, 13, 13, 14, 14, 15, 15, 16, 16,
+   17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22, 22, 23, 24, 24, 25,
+   25, 26, 27, 27, 28, 29, 29, 30, 31, 32, 32, 33, 34, 35, 35, 36,
+   37, 38, 39, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 50,
+   51, 52, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 66, 67, 68,
+   69, 70, 72, 73, 74, 75, 77, 78, 79, 81, 82, 83, 85, 86, 87, 89,
+   90, 92, 93, 95, 96, 98, 99,101,102,104,105,107,109,110,112,114,
+  115,117,119,120,122,124,126,127,129,131,133,135,137,138,140,142,
+  144,146,148,150,152,154,156,158,160,162,164,167,169,171,173,175,
+  177,180,182,184,186,189,191,193,196,198,200,203,205,208,210,213,
+  215,218,220,223,225,228,231,233,236,239,241,244,247,249,252,255 };
+
+// There is probably a better, faster way of doing this using linear transforms . . . 
+// but a look up table is dumb and simple and works and will work for any crazy layout you 
+// want.
+const uint8_t PROGMEM LEDMapping[] = {
+     0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 7, 7, 6, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1, 0, 0,
+     8, 8, 9, 9,10,10,11,11,12,12,13,13,14,14,15,15,15,15,14,14,13,13,12,12,11,11,10,10, 9, 9, 8, 8,
+    16,16,17,17,18,18,19,19,20,20,21,21,22,22,23,23,23,23,22,22,21,21,20,20,19,19,18,18,17,17,16,16,
+    24,24,25,25,26,26,27,27,28,28,29,29,30,30,31,31,31,31,30,30,29,29,28,28,27,27,26,26,25,25,24,24,
+    32,32,33,33,34,34,35,35,36,36,37,37,38,38,39,39,39,39,38,38,37,37,36,36,35,35,34,34,33,33,32,32,
+    40,40,41,41,42,42,43,43,44,44,45,45,46,46,47,47,47,47,46,46,45,45,44,44,43,43,42,42,41,41,40,40,
+    48,48,49,49,50,50,51,51,52,52,53,53,54,54,55,55,55,55,54,54,53,53,52,52,51,51,50,50,49,49,48,48,
+    56,56,57,57,58,58,59,59,60,60,61,61,62,62,63,63,63,63,62,62,61,61,60,60,59,59,58,58,57,57,56,56};
+
+int maxBrightnessScalar = 4;
+
+IntervalTimer myTimer;
+
+int selfContained = 1;
 
 void setup() {
   pinMode(pinHeartbeat, OUTPUT);
   pinMode(pinANALOGSELECT0, OUTPUT);
   pinMode(pinANALOGSELECT1, OUTPUT);
   pinMode(pinANALOGSELECT2, OUTPUT);
+
+  leds.begin();
+  int microsec = 1500000 / leds.numPixels();
+  colorWipe(RED, microsec);
+  leds.clear();
+  leds.show();
  
   Serial2.begin(1000000); // we'll see how fast we can go
   if (Debug>0){Serial.begin(9600);Serial.print("Setup Finished. Debug level: "); Serial.println(Debug);} // for debugging
@@ -80,8 +142,9 @@ void setup() {
       Serial.println(digitalRead(pinsSENSORS[counter]));}
   }
   delay(100);
-
   
+  myTimer.priority(200); // lower than most timers so micros and millis still work.
+  myTimer.begin(updateLEDs, 30000); // 30hz
 }
 
 void loop() {
@@ -130,6 +193,40 @@ void loop() {
   lngCommsTime = lngCommsEndTime - lngCommsStartTime;
 
   if(Debug>1){Serial.print("Time to handle Comms requests: "); Serial.print(lngCommsTime); Serial.println(" uS.");}
+}
+
+void updateLEDs(){
+  for (int i = 0; i < 64; i ++){
+    if (recieverLEDStatus[i] > 0){recieverLEDStatus[i] = recieverLEDStatus[i] - 1;}
+  }
+  for (int i = 0; i < 64; i ++){
+    if (IRReceiverDisplayStatus[i] > 0){recieverLEDStatus[i] = 255;}
+  }
+  mapLEDsToSensors();
+  for (int i = 0; i < 256; i++){ // num LED
+    drawingMemory[i*3] = LEDDisplay[i]; //MAPPEDLEDIntensity[i];
+  }
+  clearMyVisualData();
+  gammaCorrect();
+  leds.show();
+}
+
+// ------------------------------ THIS IS THE ONLY FUNCTION THAT NEEDS TO CHANGE TO UPDATE THE WAY LEDS MAP ---------------------------
+// this could include using a new panel, or it could include adding antialiasing. The mapping can be done via lookup table or via math,
+// although antialiasing may be trickier via look up table
+void mapLEDsToSensors(){
+  for (int i = 0; i < 256; i++){
+    LEDDisplay[i] = recieverLEDStatus[pgm_read_byte(&LEDMapping[i])];
+    //((i/4)%8)
+    //LEDdisplay[i] = recieverLEDStatus
+  }
+}
+
+void gammaCorrect(){
+  for (int i = 0; i < numled*3; i++){
+    drawingMemory[i] = drawingMemory[i] / maxBrightnessScalar;
+    drawingMemory[i] = pgm_read_byte(&gamma8[drawingMemory[i]]);
+  }
 }
 
 // allows a single function call for setting a mux channel. Note: this function currently
@@ -287,4 +384,12 @@ void printDisplayStatus(){
   } 
   Serial.println();
   
+}
+
+void colorWipe(int color, int wait) {
+  for (int i=0; i < leds.numPixels(); i++) {
+    leds.setPixel(i, color);
+    leds.show();
+    delayMicroseconds(wait);
+  }
 }
