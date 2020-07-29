@@ -46,7 +46,6 @@ int pinANALOGSELECT2 = 14;
 int pinsSENSORS[] = {15,16,17,18,19,20,21,22};
 int pinHeartbeat = 5;
 int pinLEDDATA = 1;
-//int pinHeartbeat = 13;
 
 // PROGRAM CONSTANTS
 unsigned int headerThreshold = 1200; // time in us required for a valid signal
